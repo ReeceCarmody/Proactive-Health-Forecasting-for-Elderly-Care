@@ -34,11 +34,12 @@ The goal was to predict if a fall could be predicted based on health metrics and
 - **Decision Tree**
    - A simple decision tree that allowed for easy visualization to predict Fall or No Fall.
    - Now, we find that No Movement and Oxygen Saturaton were the main predictors.
-![name](visualizations/name.png)
+![Decision Tree Plot](visualizations/PHF_decision_tree.jpg)
 - **XGBoost**
   - Combines multiple decision trees and uses gradient boosting to optimize the final output.
   - Created a SHAP plot to analyze feature importance.
   - Again, No Movement and Oxygen Saturation were the main predictors.
+![SHAP Plot](visualizations/PHF_shap_plot.jpg)
 - **Conclusion**
   - Individuals with no movement activity and low oxygen saturation were the most at risk for a potential fall.
   - From personal research, more information (such as Body Mass Index) would be high beneficial to incorporate into these models.
