@@ -1,5 +1,6 @@
 # Proactive Health Forecasting for Elderly Care
-May 2025 - June 2025
+May 2025 - June 2025   
+Written in R
 
 ## Overview
 This undergraduate research project, conducted in collaboration with a graduate student, analyzed public Kaggle datasets to predict when a critical health metric will cross a dangerous threshold in elderly patients, enabling timely interventions to prevent adverse events.
