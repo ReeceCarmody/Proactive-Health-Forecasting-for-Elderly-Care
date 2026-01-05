@@ -1,0 +1,305 @@
+---
+title: "Stats Research"
+author: "Reece Carmody"
+date: "2025-05-26"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(pROC)
+library(jtools)
+library(glmnet)
+library(yardstick)
+library(knitr)
+library(xgboost)
+library(caret)
+library(Matrix)
+library(rpart)
+library(rpart.plot)
+library(smotefamily)
+library(SHAPforxgboost)
+```
+
+```{r Input Data}
+
+### Input Data
+
+# Read in the data
+reminders_data = read.csv("C:/Users/reece/OneDrive/Desktop/daily_reminder.csv")
+health_data = read.csv("C:/Users/reece/OneDrive/Desktop/health_monitoring.csv")
+safety_data = read.csv("C:/Users/reece/OneDrive/Desktop/safety_monitoring.csv")
+
+# Merge and create one dataset
+merged = merge(reminders_data, health_data, by = "Device.ID.User.ID")
+data = merge(merged, safety_data, by = "Device.ID.User.ID")
+
+```
+
+```{r Data Cleaning}
+
+### Data Cleaning
+
+# Combine/keep useful variables
+data_clean = reminders_data[c(1, 3, 5, 6)] #Timestamp & scheduled time variables removed
+data_clean = bind_cols(data_clean, health_data[c(3:10)]) #Only health & health thresholds kept
+data_clean = bind_cols(data_clean, safety_data[c(3, 4, 7)]) #Target variable & two categoricals kept
+
+# Split up Blood Pressure into two variables
+data_clean <- data_clean %>%
+  mutate(Blood.Pressure = str_remove(Blood.Pressure, " mmHg"))
+
+data_clean <- data_clean %>%
+  separate(Blood.Pressure, into = c("Systolic", "Diastolic"), sep = "/") %>%
+  mutate(
+    Systolic = as.numeric(Systolic),
+    Diastolic = as.numeric(Diastolic)
+  )
+
+# Changing some variables to factor types
+data_clean$Reminder.Type = as.factor(data_clean$Reminder.Type)
+data_clean$Reminder.Sent..Yes.No. = as.factor(data_clean$Reminder.Sent..Yes.No.)
+data_clean$Acknowledged..Yes.No. = as.factor(data_clean$Acknowledged..Yes.No.)
+data_clean$Movement.Activity = as.factor(data_clean$Movement.Activity)
+data_clean$Fall.Detected..Yes.No. = as.factor(data_clean$Fall.Detected..Yes.No.)
+data_clean$Heart.Rate.Below.Above.Threshold..Yes.No. = as.factor(data_clean$Heart.Rate.Below.Above.Threshold..Yes.No.)
+data_clean$Blood.Pressure.Below.Above.Threshold..Yes.No. = as.factor(data_clean$Blood.Pressure.Below.Above.Threshold..Yes.No.)
+data_clean$Glucose.Levels.Below.Above.Threshold..Yes.No. = as.factor(data_clean$Glucose.Levels.Below.Above.Threshold..Yes.No.)
+data_clean$SpO..Below.Threshold..Yes.No. = as.factor(data_clean$SpO..Below.Threshold..Yes.No.)
+data_clean$Location = as.factor(data_clean$Location)
+
+```
+
+```{r Summary Statistics}
+
+### Summary Statistics
+
+nrow(data)
+colSums(is.na(data)) #There are no missing variables
+str(data) #Nearly all variables are chr type, will need to change types in future analysis
+
+# Visualizations
+
+ggplot(data_clean, aes(x = Fall.Detected..Yes.No., y = Oxygen.Saturation..SpO..., fill = Fall.Detected..Yes.No.)) +
+  geom_boxplot() +
+  labs(
+    title = "Oxygen Saturation by Fall Status",
+    x = "Fall Detected",
+    y = "Oxygen Saturation (%)"
+  ) +
+  scale_fill_manual(values = c("lightblue", "salmon")) +
+  theme_minimal()
+
+ggplot(data_clean, aes(x = Movement.Activity, fill = Fall.Detected..Yes.No.)) +
+  geom_bar(position = "fill") +
+  labs(title = "Activity Type vs Fall Rate", y = "Proportion") +
+  scale_fill_manual(values = c("lightblue", "salmon")) +
+  theme_minimal()
+
+# Fall detected pie chart
+Fall_Detected_df = as.data.frame(safety_data$Fall.Detected..Yes.No.)
+colnames(Fall_Detected_df) = c("Fall_Detected")
+
+ggplot(Fall_Detected_df, aes(x = "", y = Fall_Detected, fill = Fall_Detected)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y") +
+  labs(title = "Fall Detected Pie Chart") +
+  theme_void() +
+  scale_fill_manual(values = c("lightblue", "lightcoral"))
+
+```
+
+```{r Creating SMOTE Data}
+
+### Creating SMOTE Data
+
+model_input_data = data_clean[c(2:16)]
+model_input_data = model.matrix(~ . - 1, data = model_input_data) #Convert categorical to numerical
+model_input_data = as.data.frame(model_input_data) #Convert back to data frame
+
+indices = sample(1:10000, 8000) # Get 8,000 sample for training
+train_raw = model_input_data[indices, ]
+test_raw = model_input_data[-indices, ]
+
+train_features_raw = train_raw[, -19] # Separate target variable for smote
+train_target_raw = train_raw[, 19]
+
+smote_model = SMOTE(X = train_features_raw, target = train_target_raw, K = 5, dup_size = 0)
+
+train_smote_full = smote_model$data
+colnames(train_smote_full)[22] = "Fall.Detected..Yes.No."
+train_smote_full$Fall.Detected..Yes.No. = as.numeric(train_smote_full$Fall.Detected..Yes.No.)
+
+train_smote_target = train_smote_full$Fall.Detected..Yes.No.
+train_smote_matrix = as.matrix(train_smote_full[, -22])
+
+test_features_matrix = as.matrix(test_raw[, -19])
+test_target = test_raw[, 19]
+
+# Created data sets & splits:
+# --------------------------
+
+# train_features_raw -> variables only, before SMOTE
+# train_target_raw -> target only, before SMOTE
+
+# train_smote_full - > all data, after SMOTE
+
+# train_smote_matrix -> variables for modeling, after SMOTE
+# train_smote_target -> target only, after SMOTE
+
+# test_features_matrix -> variables for testing, untouched data
+# test_target -> target for testing, untouched data
+
+```
+
+```{r Logistic Regression Model}
+
+### Logistic Regression (Model 1) with Ridge
+
+ridge_model = cv.glmnet(x = train_smote_matrix,
+                        y = train_smote_target,
+                        alpha = 0,
+                        family = "binomial",
+                        nfolds = 5)
+
+ridge_model_2 = glmnet(x = train_smote_matrix, # No cross validation for the graph
+                       y = train_smote_target,
+                       alpha = 0,
+                       family = "binomial")
+
+# Ridge coefficient graph
+plot(ridge_model_2, xvar = "lambda", label = TRUE, main = "Ridge Coefficient Path")
+
+probabilities = predict(ridge_model, newx = test_features_matrix, s = ridge_model$lambda.min, type = "response")
+predictions = ifelse(probabilities > 0.5, 1, 0)
+
+# Confusion Matrix
+logistic_conf = confusionMatrix(factor(predictions), factor(test_target))
+
+# ROC Curve
+ROC_curve = roc(test_target, as.numeric(probabilities))
+plot(ROC_curve, main = "ROC Curve", col = "blue", lwd = 2)
+logistic_auc = auc(ROC_curve)
+
+```
+
+```{r XGBoost Model}
+
+### XGBoost Model
+
+xgb_model = xgboost(data = train_smote_matrix,
+                        label = train_smote_target,
+                        objective = "binary:logistic",
+                        nrounds = 100,
+                        max_depth = 5,
+                        eta = 0.1,
+                        verbose = 0)
+
+predictions = predict(xgb_model, test_features_matrix)
+predictions_labels = ifelse(predictions > 0.5, 1, 0) #Classify based on the prediction
+
+# Confusion matrix
+xgboost_conf = confusionMatrix(factor(predictions_labels), factor(test_target))
+
+# Variable importance graph
+importance = xgb.importance(model = xgb_model)
+xgb.plot.importance(importance) #Plot variables based on importance
+
+# ROC curve
+ROC_curve = roc(test_target, predictions)
+plot(ROC_curve, main = "ROC Curve", col = "blue", lwd = 2)
+xgboost_auc = auc(ROC_curve)
+
+# SHAP
+shap_values = shap.prep(xgb_model = xgb_model, X_train = train_smote_matrix)
+shap.plot.summary(shap_values)
+
+```
+
+```{r Decision Tree Model}
+
+### Decision Tree Model
+
+train_smote_full$Fall.Detected..Yes.No. = as.factor(train_smote_full$Fall.Detected..Yes.No.)
+
+tree_model = rpart(Fall.Detected..Yes.No. ~ .,
+                   data = train_smote_full,
+                   method = "class",
+                   control = rpart.control(minsplit = 4, cp = 0, maxdepth = 5))
+
+rpart.plot(tree_model, type = 2, extra = 104, under = TRUE, fallen.leaves = TRUE)
+
+test_features_df = as.data.frame(test_features_matrix)
+predictions = predict(tree_model, test_features_df, type = "class")
+
+predicted = factor(predictions, levels = c(0, 1))
+actual = factor(test_target, levels = c(0, 1))
+
+# Confusion matrix
+tree_conf = confusionMatrix(predicted, actual)
+
+# Variable importance table
+tree_model$variable.importance
+
+# ROC curve
+probabilities = predict(tree_model, test_features_df, type = "prob")
+fall_probabilities = probabilities[, "1"]
+
+ROC_curve = roc(actual, fall_probabilities)
+plot(ROC_curve, main = "ROC Curve", col = "blue", lwd = 2)
+tree_auc = auc(ROC_curve)
+
+```
+
+```{r Summary Table}
+
+# Summary Table
+# Note: these values are after ridge & SMOTE
+# Includes the logistic regression model, XGBoost model, and the decision tree
+
+summary_table = tibble::tibble(
+  Model = c("Logistic Regression", "XGBoost", "Decision Tree"),
+  Accuracy = c(logistic_conf$overall["Accuracy"], 
+               xgboost_conf$overall["Accuracy"], 
+               tree_conf$overall["Accuracy"]),
+  Sensitivity = c(logistic_conf$byClass["Sensitivity"], 
+                  xgboost_conf$byClass["Sensitivity"], 
+                  tree_conf$byClass["Sensitivity"]),
+  Specificity = c(logistic_conf$byClass["Specificity"],
+                  xgboost_conf$byClass["Specificity"],
+                  tree_conf$byClass["Specificity"]),
+  AUC = c(logistic_auc,
+          xgboost_auc,
+          tree_auc)
+)
+
+
+summary_table
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
